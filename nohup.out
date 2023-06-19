@@ -1,0 +1,25 @@
+WARNING:[33mNOTE: Redirects are currently not supported in Windows or MacOs.[0m
+Traceback (most recent call last):
+  File "./server.py", line 47, in <module>
+    from modules import chat, shared, training, ui, utils
+  File "/Users/wujianmin/bak-from-mac/Code/git/text-generation-webui/modules/chat.py", line 18, in <module>
+    from modules.text_generation import (generate_reply, get_encoded_length,
+  File "/Users/wujianmin/bak-from-mac/Code/git/text-generation-webui/modules/text_generation.py", line 17, in <module>
+    from modules.models import clear_torch_cache, local_rank
+  File "/Users/wujianmin/bak-from-mac/Code/git/text-generation-webui/modules/models.py", line 9, in <module>
+    from accelerate import infer_auto_device_map, init_empty_weights
+  File "/Users/wujianmin/miniforge3/envs/conda-env-tf/lib/python3.8/site-packages/accelerate/__init__.py", line 3, in <module>
+    from .accelerator import Accelerator
+  File "/Users/wujianmin/miniforge3/envs/conda-env-tf/lib/python3.8/site-packages/accelerate/accelerator.py", line 36, in <module>
+    from .tracking import LOGGER_TYPE_TO_CLASS, GeneralTracker, filter_trackers
+  File "/Users/wujianmin/miniforge3/envs/conda-env-tf/lib/python3.8/site-packages/accelerate/tracking.py", line 42, in <module>
+    from torch.utils import tensorboard
+  File "/Users/wujianmin/miniforge3/envs/conda-env-tf/lib/python3.8/site-packages/torch/utils/tensorboard/__init__.py", line 12, in <module>
+    from .writer import FileWriter, SummaryWriter  # noqa: F401
+  File "/Users/wujianmin/miniforge3/envs/conda-env-tf/lib/python3.8/site-packages/torch/utils/tensorboard/writer.py", line 9, in <module>
+    from tensorboard.compat.proto.event_pb2 import SessionLog
+  File "/Users/wujianmin/miniforge3/envs/conda-env-tf/lib/python3.8/site-packages/tensorboard/compat/proto/event_pb2.py", line 8, in <module>
+    from google.protobuf import descriptor as _descriptor
+  File "/Users/wujianmin/miniforge3/envs/conda-env-tf/lib/python3.8/site-packages/google/protobuf/descriptor.py", line 47, in <module>
+    from google.protobuf.pyext import _message
+TypeError: bases must be types

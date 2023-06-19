@@ -31,6 +31,7 @@ def auto_transcribe(audio, auto_submit):
         return "", ""
 
     transcription = do_stt(audio)
+    print(f"transcription from stt: {transcription}")
     if auto_submit:
         input_hijack.update({"state": True, "value": [transcription, transcription]})
 

@@ -34,6 +34,10 @@ def select_model_from_default_options():
         "Pythia-2.8B-deduped": ("EleutherAI", "pythia-2.8b-deduped", "main"),
         "Pythia-1.4B-deduped": ("EleutherAI", "pythia-1.4b-deduped", "main"),
         "Pythia-410M-deduped": ("EleutherAI", "pythia-410m-deduped", "main"),
+        "ChatGLM 6B": ("THUDM", "chatglm-6b", "main"),
+        "bloom-1b4-zh": ("YeungNLP", "bloom-1b4-zh", "main"), 
+        "bloomz-1b4-zh": ("YeungNLP", "bloomz-1b4-zh", "main"),
+        "llama-7b-hf": ("yahma", "llama-7b-hf", "main")
     }
 
     choices = {}
