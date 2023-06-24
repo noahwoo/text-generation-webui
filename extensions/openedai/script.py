@@ -19,7 +19,9 @@ from tenacity import retry, wait_random_exponential, stop_after_attempt
 import tiktoken
 from tqdm import tqdm
 from termcolor import colored
-
+from extensions.openedai.search import ScholarSearch 
+from extensions.openedai.search import Result
+from extensions.openedai.conversation import Conversation
 
 GPT_MODEL = "gpt-3.5-turbo-0613"
 EMBEDDING_MODEL = "text-embedding-ada-002"
@@ -29,7 +31,7 @@ openai.api_base = "https://dev.chatwithoracle.com/api/v1"
 # Set a directory to store downloaded papers
 doc_root = 'data'
 
-data_dir = os.path.join(doc_root, 'papers')
+paper_dir = os.path.join(doc_root, 'papers')
 paper_dir_filepath = f"{doc_root}/arxiv_library.csv"
 conversation_dir_filepath = f"{doc_root}/conversation_history.json"
 
@@ -54,48 +56,82 @@ def build_paper_head(paper_head, prefix = None) :
     head += f"**[{paper_head['title']}]({paper_head['article_url']})**\n- **Author(s):**"
 
     authors = paper_head['authors']
-    if isinstance(authors, str) :
-        authors = eval(authors)
+    head += authors
+    # if isinstance(authors, str) :
+    #     authors = eval(authors)
 
-    for idx, author in enumerate(authors) :
-        head += f"{author.name}" if idx == 0 else f", {author.name}"
+    # for idx, author in enumerate(authors) :
+    #     head += f"{author.name}" if idx == 0 else f", {author.name}"
     
     if 'summary' in paper_head :
         head += f"\n- **Summary**: {paper_head['summary']}"
     head += f"\n- **Publish Date**: {paper_head['published']}"
     return head
 
-def search_article_list(query, library=paper_dir_filepath, top_k=5, recent_days=None):
+"""Function to download an academic paper from arXiv to answer user questions."""
+def get_articles(query, library=paper_dir_filepath):
+    
+    print(f"Query: {query}")
+    search_results = ScholarSearch().search(query, site='arxiv.org', num = 1)
+    
+    assert len(search_results) > 0, f"No papers found for query {query}"
+    result = search_results[0]
+    # Store references in library file
+    response = embedding_request(text=result.title)
+    print(f"download [{result.title}] to {paper_dir}")
+    file_reference = [
+        result.title,
+        result.authors,
+        result.published,
+        result.article_url,
+        result.pdf_url,
+        result.download_pdf(paper_dir),
+        response["data"][0]["embedding"],
+    ]
+
+    # Write to file
+    with open(library, "a") as f_object:
+        writer_object = writer(f_object)
+        writer_object.writerow(file_reference)
+        f_object.close()
+
+    return result
+
+def search_article_list(query, library=paper_dir_filepath, top_k=5, recent_days=None, year_from=None):
     """
     This function gets the top_k articles based on a user's query, sorted by relevance and recency. 
     Return the title, summary, authors and published date for each article
     """
-    search = arxiv.Search(
-        query=query, max_results=top_k, sort_by=arxiv.SortCriterion.Relevance
-    )
+    # search = arxiv.Search(
+    #     query=query, max_results=top_k, sort_by=arxiv.SortCriterion.Relevance
+    # )
+
+    search_results = ScholarSearch().search(query, site='arxiv.org', num = top_k, year_from = year_from)
 
     result_list = []
-    for result in search.results():
+    # for result in search.results():
+    for result in search_results:
         result_dict = {}
         result_dict.update({"title": result.title})
         result_dict.update({"summary": result.summary})
-        result_dict.update({"authors": result.authors})
+        result_dict.update({"authors": result.authors if result.authors is not None else 'NA'})
         result_dict.update({"published": result.published})
 
         # Taking the first url provided
-        result_dict.update({"article_url": [x.href for x in result.links][0]})
-        result_dict.update({"pdf_url": [x.href for x in result.links][1]})
+        # result_dict.update({"article_url": [x.href for x in result.links][0]})
+        # result_dict.update({"pdf_url": [x.href for x in result.links][1]})
+        result_dict.update({"article_url": result.article_url})
         result_list.append(result_dict)
     
         # Store references in library file
         response = embedding_request(text=result.title)
-        print(f"download PDF to {data_dir}")
         file_reference = [
             result.title,
             result.authors,
             result.published,
-            result_dict['article_url'],
-            result.download_pdf(data_dir),
+            result.article_url,
+            result.pdf_url,
+            result.local_pdf_path(paper_dir),
             response["data"][0]["embedding"],
         ]
 
@@ -118,20 +154,23 @@ def strings_ranked_by_relatedness(
     query: str,
     df: pd.DataFrame,
     relatedness_fn=lambda x, y: 1 - spatial.distance.cosine(x, y),
-    top_n: int = 100,
-    rel_th : float = 0.95) -> list[str]:
+    top_n: int = 10,
+    rel_th : float = 0.6) -> list[str]:
     """Returns a list of strings and relatednesses, sorted from most related to least."""
     query_embedding_response = embedding_request(query)
     query_embedding = query_embedding_response["data"][0]["embedding"]
     strings_and_relatednesses = [
         ({"filepath" : row["filepath"], "title": row["title"], 
           "authors" : row["authors"], "published" : row["published"], 
-          "article_url" : row["article_url"]}, 
+          "article_url" : row["article_url"], "pdf_url" : row["pdf_url"]}, 
          relatedness_fn(query_embedding, row["embedding"]))
         for i, row in df.iterrows()
     ]
     strings_and_relatednesses.sort(key=lambda x: x[1], reverse=True)
     strings, relatednesses = zip(*strings_and_relatednesses)
+    print(f"Top {top_n} papers with relatedness to [{query}]:\n")
+    for idx, string in enumerate(strings[:top_n]):
+        print(f"{idx+1}. [{relatednesses[idx]}] [{string['title']}]")
     if relatednesses[top_n-1] > rel_th :
         print(f"Find paper with relatedness {relatednesses[top_n-1]} > {rel_th}!\n")
         return strings[:top_n]
@@ -189,27 +228,28 @@ def summarize_text(query):
 
     # If the library is empty (no searches have been performed yet), we perform one and download the results
     library_df = pd.read_csv(paper_dir_filepath).reset_index()
-    if len(library_df) == 0:
-        print("No papers searched yet, downloading first.")
-        result_list = get_articles(query)
-        print("Papers downloaded, continuing")
-        library_df = pd.read_csv(paper_dir_filepath).reset_index()
-
+    index_schema =  ["title", "authors", "published", "article_url", "pdf_url", "filepath", "embedding"]
+    library_df.columns = index_schema
+    library_df["embedding"] = library_df["embedding"].apply(ast.literal_eval) # eval emb vector
     # rank by relatedness
-    library_df.columns = ["title", "authors", "published", "article_url", "filepath", "embedding"]
-    library_df["embedding"] = library_df["embedding"].apply(ast.literal_eval)
-    strings = strings_ranked_by_relatedness(query, library_df, top_n=1, rel_th=0.95)
+    strings = strings_ranked_by_relatedness(query, library_df, top_n=1, rel_th=0.9)
 
     if strings is None : # no-related papers in local repository, search arXiv again
-        result_list = get_articles(query)
+        result = get_articles(query)
         library_df = pd.read_csv(paper_dir_filepath).reset_index()
-        library_df.columns = ["title", "authors", "published", "article_url", "filepath", "embedding"]
+        library_df.columns = index_schema
         library_df["embedding"] = library_df["embedding"].apply(ast.literal_eval)
         strings = strings_ranked_by_relatedness(query, library_df, top_n=1)
     
-    assert strings is not None, "No papers found"
-    
+    assert strings is not None and len(strings) > 0, f"No papers found for query [{query}]"
+
     print("Chunking text from paper")
+    if not os.path.exists(strings[0]['filepath']) :
+        print(f"Download paper from [{strings[0]['pdf_url']}] to [{strings[0]['filepath']}]")
+        Result.download_pdf_to_path(strings[0]['pdf_url'], strings[0]['filepath'])
+    
+    assert os.path.exists(strings[0]['filepath']), f"File not found at {strings[0]['filepath']}"
+
     pdf_text = read_pdf(strings[0]['filepath'])
 
     # Initialise tokenizer
@@ -278,55 +318,12 @@ def chat_completion_request(messages, functions=None, model=GPT_MODEL):
             headers=headers,
             json=json_data,
         )
-        print(f"response from {base}/v1/chat/completions: '{response}' for request '{messages}'")
+        print(f"response from {base}/v1/chat/completions: '{response.json()}' for request '{messages}'")
         return response
     except Exception as e:
         print("Unable to generate ChatCompletion response")
         print(f"Exception: {e}")
         return e
-
-class Conversation:
-    def __init__(self, conversation_dir_filepath):
-        self.conversation_history = []
-        self.conversation_dir_filepath = conversation_dir_filepath
-
-        if os.path.exists(self.conversation_dir_filepath):
-            self.load_history()
-            self.display_conversation()
-        self.system_setted = False
-
-    def add_message(self, role, content):
-        message = {"role": role, "content": content}
-        if role == "system" :
-            self.system_setted = True
-        
-        self.conversation_history.append(message)
-        with open(self.conversation_dir_filepath, "w") as f:
-            json.dump(self.conversation_history, f, ensure_ascii=False)
-
-    def load_history(self) :
-        with open(self.conversation_dir_filepath, "r") as f:
-            self.conversation_history = json.load(f)
-            for message in self.conversation_history :
-                if message["role"] == "system" :
-                    self.system_setted = True
-                    break
-        pass
-    
-    def display_conversation(self, detailed=False):
-        role_to_color = {
-            "system": "red",
-            "user": "green",
-            "assistant": "blue",
-            "function": "magenta",
-        }
-        for message in self.conversation_history:
-            print(
-                colored(
-                    f"{message['role']}: {message['content']}\n\n",
-                    role_to_color[message["role"]],
-                )
-            )
 
 # Initiate our get_articles and read_article_and_summarize functions
 arxiv_functions = [
@@ -339,7 +336,8 @@ arxiv_functions = [
                 "query": {
                     "type": "string",
                     "description": f"""
-                            User query in JSON. Responses should be summarized and should include the article URL reference
+                            User query is the subject of the article in plain text. 
+                            Responses should be summarized and should include the article URL reference
                             """,
                 }
             },
@@ -351,7 +349,8 @@ arxiv_functions = [
         "name": "search_and_return_articles", 
         "description": """Use this function to search arXiv database for a list of articles related to user query and return, 
         argument 'top_k' should be an integer for the number of articles to return,
-        argument 'recency_days' should be an integer for the number of days since the article was published""",
+        argument 'recency_days' should be an integer for the number of days since the article was published
+        argument 'year_from' should be an integer for the year from which you want the results to be included""",
         "parameters": {
             "type": "object",
             "properties": {
@@ -366,7 +365,11 @@ arxiv_functions = [
                 "recent_days" : {
                     "type": "integer",
                     "description": f"""Number of days since the article was published"""
-                }
+                },
+                "year_from" : {
+                    "type": "integer",
+                    "description": f"""The year from which you want the results to be included"""
+                },
             }, 
             "required": ["query"],
         },
@@ -391,6 +394,19 @@ arxiv_functions = [
     }
 ]
 
+
+#################################################
+# Define a conversation for the paper assistant #
+#################################################
+
+paper_system_message = """You are arXivGPT, a helpful assistant pulls academic papers to answer user questions. 
+You search for a list of papers to answer user questions. You read and summarize the paper clearly according to user provided topics.
+Please summarize in clear and concise format. Begin!"""
+
+paper_conversation = Conversation(conversation_dir_filepath)
+if not paper_conversation.system_setted :
+    paper_conversation.add_message("system", paper_system_message)
+
 def chat_completion_with_function_execution(messages, functions=[None]):
     """This function makes a ChatCompletion API call with the option of adding functions"""
     response = chat_completion_request(messages, functions)
@@ -402,18 +418,11 @@ def chat_completion_with_function_execution(messages, functions=[None]):
         print(f"Function not required, responding to user")
         return response.json()
 
-def get_articles(query):
-    """Function to download an academic paper from arXiv to answer user questions."""
-    print(f"Query: {query}")
-    articles = arxiv.query(query=query, max_results=10)
-    print(f"Number of articles found: {len(articles)}")
-    return articles
-
 def call_arxiv_function(messages, full_message):
     """Function calling function which executes function calls when the model believes it is necessary.
     Currently extended by adding clauses to this if statement."""
     func_name = full_message["message"]["function_call"]["name"]
-    print(f'Get function name: {func_name}')
+    print(f'####Get function name: {func_name}')
     if func_name == "get_articles":
         try:
             parsed_output = json.loads(
@@ -445,38 +454,28 @@ def call_arxiv_function(messages, full_message):
             full_message["message"]["function_call"]["arguments"]
         )
         print("Finding and reading paper")
-        summary = summarize_text(parsed_output["query"])
+        query = parsed_output["query"]
+        summary = summarize_text(query)
+        # comment out function call record, cause leads to error for following function generation
+        # paper_conversation.add_message('function', f'{func_name}("{query}")')
         return summary
     elif func_name == "search_and_return_articles" :
         arguments = eval(full_message["message"]["function_call"]["arguments"])
-        article_lst = search_article_list(arguments['query'], top_k=arguments['top_k'])
+        article_lst = search_article_list(arguments['query'], 
+                                          top_k=arguments['top_k'] if 'top_k' in arguments else None,
+                                          year_from=arguments['year_from'] if 'year_from' in arguments else None,
+                                          recent_days=arguments['recent_days'] if 'recent_days' in arguments else None)
+        # comment out function call record, cause leads to error for following function generation
+        # paper_conversation.add_message('function', f'{func_name}({arguments})')
         return article_lst
     else:
         raise Exception("Function does not exist and cannot be called")
 
-#################################################
-# Define a conversation for the paper assistant #
-#################################################
-
-paper_system_message = """You are arXivGPT, a helpful assistant pulls academic papers to answer user questions. 
-You search for a list of papers to answer user questions. You read and summarize the paper clearly according to user provided topics.
-Please summarize in clear and concise format. Begin!"""
-
-paper_conversation = Conversation(conversation_dir_filepath)
-if not paper_conversation.system_setted :
-    paper_conversation.add_message("system", paper_system_message)
 
 def custom_generate_reply(question, original_question, seed, state, eos_token, stopping_strings, is_chat = True):
-
-    # Add a user message
-    print(f"custom_generate(question): {question}\n")
-    print(f"custom_generate(original_question): {original_question}\n")
-    print(f"custom_generate(seed): {seed}\n")
-    print(f"custom_generate(state): {state}\n")
-    print(f"custom_generate(eos_token): {eos_token}\n")
-    print(f"custom_generate(stopping_strings): {stopping_strings}\n")
-
     # extract the last question
+    print(f"custom_generate_reply called with question: [{question}]")
+    paper_conversation.check_and_reset(question)
     current_question = ":".join(question.split("\n")[-2].split(":")[1:]).lstrip()
     paper_conversation.add_message("user", f"{current_question}")
     chat_response = chat_completion_with_function_execution(

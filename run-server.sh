@@ -1,3 +1,2 @@
 #!/bin/zsh
-
-python ./server.py --extensions openedai whisper-sst --chat --model yahma_llama-7b-q4_0
+python ./server.py --extensions whisper-sst openedai --chat --model llama-7b-zh-alpaca-lora-ggml-q4_0
