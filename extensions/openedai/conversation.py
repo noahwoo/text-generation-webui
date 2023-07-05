@@ -12,10 +12,10 @@ class Conversation:
         if os.path.exists(self.conversation_dir_filepath):
             self.load_history()
             self.display_conversation()
-            
+
     def check_and_reset(self, question):
         conversation_list = question.split("\n")
-        me_count = np.sum(1 if c.startswith("Me") else 0 for c in conversation_list)
+        me_count = np.sum(1 for c in conversation_list if c.startswith("Me:"))
         if me_count > 1: 
             return
         self.conversation_history = self.conversation_history[:1]
