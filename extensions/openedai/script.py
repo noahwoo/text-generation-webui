@@ -7,9 +7,10 @@ import openai
 import pandas as pd
 from tqdm import tqdm
 from termcolor import colored
-from extensions.openedai.search import ScholarSearch, PaperRepository, VectorStore
+from extensions.openedai.search import ScholarSearch, PaperRepository, VectorStore, emb_service
 from extensions.openedai.utils import Utils, OpenAIUtils, GPT_MODEL
 from extensions.openedai.conversation import Conversation
+import numpy as np
 
 # Set a directory to store downloaded papers
 doc_root = 'data'
@@ -19,17 +20,13 @@ paper_dir_filepath = f"{doc_root}/arxiv_library.csv"
 conversation_dir_filepath = f"{doc_root}/conversation_history.json"
 
 # wrap df with PaperRepository
-paper_repo = PaperRepository()
-if os.path.exists(paper_dir_filepath):
-    paper_repo.load(paper_dir_filepath)
-else :
-    paper_repo.create(paper_dir_filepath)
+paper_repo = PaperRepository(paper_dir_filepath)
 
 # vector store for paper trunks
-paper_trunks = VectorStore()
+paper_chunks = VectorStore()
 
 """Function to download an academic paper from arXiv to answer user questions."""
-def get_articles(query, library=paper_dir_filepath):
+def get_articles(query):
     
     print(f"Query: {query}")
     search_results = ScholarSearch().search(query, site='arxiv.org', num = 1)
@@ -37,7 +34,7 @@ def get_articles(query, library=paper_dir_filepath):
     assert len(search_results) > 0, f"No papers found for query {query}"
     result = search_results[0]
     # Store references in library file
-    response = OpenAIUtils.embedding_request(text=result.title)
+    title_emb = emb_service.embedding_texts([result.title])[0]
     print(f"download [{result.title}] to {paper_dir}")
     file_reference = [
         result.title,
@@ -46,19 +43,13 @@ def get_articles(query, library=paper_dir_filepath):
         result.article_url,
         result.pdf_url,
         result.download_pdf(paper_dir),
-        response["data"][0]["embedding"],
+        title_emb,
     ]
-
-    # Write to file
-    with open(library, "a") as f_object:
-        writer_object = writer(f_object)
-        writer_object.writerow(file_reference)
-        f_object.close()
-
+    paper_repo.add_paper_meta(file_reference)
     return result
 
 """functions: support the paper search request from users"""
-def search_article_list(query, library=paper_dir_filepath, top_k=5, recent_days=None, year_from=None):
+def search_article_list(query, top_k=5, recent_days=None, year_from=None):
     """
     This function gets the top_k articles based on a user's query, sorted by relevance and recency. 
     Return the title, summary, authors and published date for each article
@@ -85,7 +76,7 @@ def search_article_list(query, library=paper_dir_filepath, top_k=5, recent_days=
         result_list.append(result_dict)
     
         # Store references in library file
-        response = OpenAIUtils.embedding_request(text=result.title)
+        title_emb = emb_service.embedding_texts([result.title])[0]
         file_reference = [
             result.title,
             result.authors,
@@ -93,14 +84,9 @@ def search_article_list(query, library=paper_dir_filepath, top_k=5, recent_days=
             result.article_url,
             result.pdf_url,
             result.local_pdf_path(paper_dir),
-            response["data"][0]["embedding"],
+            title_emb,
         ]
-
-        # Write to file
-        with open(library, "a") as f_object:
-            writer_object = writer(f_object)
-            writer_object.writerow(file_reference)
-            f_object.close()
+        paper_repo.add_paper_meta(file_reference)
         
     # compose result manually
     if len(result_list) == 0:
@@ -112,20 +98,30 @@ def search_article_list(query, library=paper_dir_filepath, top_k=5, recent_days=
     return result_buffer
 
 """functions: support the paper content query from user"""
-def chat_with_paper(query, pdf_url) :
+def chat_with_paper(query, article_url) :
+
     print(f"chat_with_paper: query:{query}")
-    print(f"chat_with_paper: pdf_url:{pdf_url}")
+    print(f"chat_with_paper: article_url:{article_url}")
 
-    pdf_file_path = paper_repo.get_filepath(pdf_url)
+    # TODO: load when necessary
+    paper_repo.load()
+
+    pdf_file_path = paper_repo.get_filepath(article_url)
     if not os.path.exists(pdf_file_path):
-        print(f"Download paper from [{pdf_url}] to [{pdf_file_path}]")
-        Utils.download_pdf_to_path(pdf_url, pdf_file_path)
+        print(f"Download paper from [{article_url}] to [{pdf_file_path}]")
+        Utils.download_pdf_to_path(article_url, pdf_file_path)
     
-    if not paper_trunks.indexed(pdf_url) :
-        paper_trunks.add_paper(pdf_url, pdf_file_path, paper_repo.get_meta(pdf_url))
+    if not paper_chunks.indexed(article_url) :
+        print(f"Chunk paper and index with key [{article_url}]")
+        paper_chunks.add_paper(article_url, pdf_file_path, paper_repo.get_meta(article_url))
 
-    trunks = paper_trunks.query(query, n_result=10)
-    background = ';'.join(trunks)
+    trunks, scores = paper_chunks.query(query, article_url, n_result=10)
+    background = '\n'.join(trunks[0])
+
+    print("#######################")
+    for trunk, score in zip(trunks[0], scores[0]) :
+        print(f"{score}: {trunk}")
+    print("#######################")
 
     # prompt and summarize 
     print("Summarizing into overall summary")
@@ -154,14 +150,14 @@ def summarize_text(query):
 
     # A prompt to dictate how the recursive summarizations should approach the input paper
     summary_prompt = """Summarize this text from an academic paper. Extract any key points with reasoning.\n\nContent:"""
-    # load paper repository
-    paper_repo.load(paper_dir_filepath)
+    # FIXME: load paper repository when necessary
+    paper_repo.load()
     # rank by relatedness
     strings = paper_repo.strings_ranked_by_relatedness(query, top_n=1, rel_th=0.9)
 
     if strings is None : # no-related papers in local repository, search arXiv again
         result = get_articles(query)
-        paper_repo.load(paper_dir_filepath)
+        paper_repo.load()
         strings = paper_repo.strings_ranked_by_relatedness(query, top_n=1)
     
     assert strings is not None and len(strings) > 0, f"No papers found for query [{query}]"
@@ -175,17 +171,17 @@ def summarize_text(query):
 
     pdf_text = Utils.read_pdf(strings[0]['filepath'])
 
-    # Chunk up the document into 1500 token chunks
-    text_chunks = Utils.chrunk_sentence(pdf_text, max_tokens=1500)
-    print("Summarizing each chunk of text")
-
+    # Chunk up the document into 300 token chunks
+    text_chunks = Utils.chunk_sentence(pdf_text, max_tokens_each_trunk=1500)
+    print(f"Summarizing for {len(text_chunks)} chunks of text, {np.sum([len(x) for x in text_chunks])}/{len(pdf_text)} text")
+    
     results = ""
     # Parallel process the summaries
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=len(text_chunks)
     ) as executor:
         futures = [
-            executor.submit(Utils.extract_chunk, chunk, summary_prompt)
+            executor.submit(OpenAIUtils.extract_chunk, chunk, summary_prompt)
             for chunk in text_chunks
         ]
         with tqdm(total=len(text_chunks)) as pbar:
@@ -296,13 +292,13 @@ arxiv_functions = [
                     "type" : "string",
                     "description" : """The question from user to query the content of paper in plain text"""
                 }, 
-                "pdf_url" : {
+                "article_url" : {
                     "type" : "string",
-                    "description" : """URL of the pdf file of the paper, value of this argument should be extracted 
+                    "description" : """URL of the article, value of this argument should be extracted 
                         from the response of search_and_return_articles function"""
                 }
             }, 
-             "required": ["query", "pdf_url"],
+             "required": ["query", "article_url"],
         }
     }
 ]
@@ -361,8 +357,8 @@ def call_arxiv_function(messages, full_message):
         arguments = eval(full_message["message"]["function_call"]["arguments"])
         print("Finding and reading paper")
         query   = arguments["query"]
-        pdf_url = arguments["pdf_url"]
-        result  = chat_with_paper(query, pdf_url)
+        article_url = arguments["article_url"]
+        result  = chat_with_paper(query, article_url)
         # comment out function call record, cause leads to error for following function generation
         # paper_conversation.add_message('function', f'{func_name}({arguments})')
         return result
@@ -383,21 +379,15 @@ def chat_completion_with_function_execution(messages, functions=[None]):
 
 
 """
-# Define a conversation for the paper assistant, reply to user input from WebUI
+# Define a conversation for the paper assistant, reply to user input from UI
 """
 
-paper_system_message = """You are arXivGPT, a helpful assistant pulls academic papers to answer user questions. 
-You search for a list of papers to answer user questions. You read and summarize the paper clearly according to user provided topics.
-Please summarize in clear and concise format. Begin!"""
-
 paper_conversation = Conversation(conversation_dir_filepath)
-if not paper_conversation.system_setted :
-    paper_conversation.add_message("system", paper_system_message)
 
 def custom_generate_reply(question, original_question, seed, state, eos_token, stopping_strings, is_chat = True):
     # extract the last question
     print(f"custom_generate_reply called with question: [{question}]")
-    paper_conversation.check_and_reset(question)
+    # paper_conversation.check_and_reset(question)
     current_question = ":".join(question.split("\n")[-2].split(":")[1:]).lstrip()
     paper_conversation.add_message("user", f"{current_question}")
     chat_response = chat_completion_with_function_execution(

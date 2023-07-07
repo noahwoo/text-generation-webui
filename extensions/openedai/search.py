@@ -5,11 +5,15 @@ import chromadb
 import pandas as pd
 from collections import defaultdict 
 import chromadb
-from extensions.openedai.utils import Utils, OpenAIUtils
+from extensions.openedai.utils import Utils, OpenAIUtils, EmbeddingService
 import ast
 from scipy import spatial
+from csv import writer
 
 os.environ['SERPAPI_API_KEY'] = '5ca1f5544dd75a93725b3017b9870c502c364be13f2610a3c2b83cdd5126487c'
+
+
+emb_service = EmbeddingService(embedding_vendor='Default')
 
 '''
 A class for search result of paper, include title, authors, abstract, pdf link, and publish information
@@ -87,32 +91,49 @@ class ScholarSearch :
         return paper_list
 
 '''
-Repository for papers, 
+Repository for papers
 '''
 class PaperRepository :
-    def __init__(self) :
-        # fixed schema for PaperIndex
+    def __init__(self, path) :
+        # fixed schema for PaperRepository
         self.schema = ["title", "authors", "published", "article_url", "pdf_url", "filepath", "embedding"]
         self.url2meta = defaultdict(dict)
         self.library_df = pd.DataFrame(list())
-        pass
+        self.path = path
+
+        # load or create paper repo
+        if os.path.exists(self.path):
+            self.load()
+        else :
+            self.create()
     
-    def load(self, path) :
+    def add_paper_meta(self, meta) :
+        # Write to file
+        with open(self.path, "a") as f_object:
+            writer_object = writer(f_object)
+            writer_object.writerow(meta)
+            f_object.close()
+
+    def load(self) :
         # read csv
-        self.library_df = pd.read_csv(path).reset_index()
+        self.library_df = pd.read_csv(self.path).reset_index()
+        print(f"len(library_df.columns): {len(self.library_df.columns)}")
         self.library_df.columns = self.schema
         self.library_df["embedding"] = self.library_df["embedding"].apply(ast.literal_eval) # eval emb vector
         # load url2meta dictionary
         for i, row in self.library_df.iterrows() :
-            self.url2meta[row['pdf_url']].update(
+            print(f"load paper meta: article_url:{row['article_url']}, filepath:{row['filepath']}")
+            self.url2meta[row['article_url']].update(
                 {
                     "filepath" : row["filepath"], 
-                    "title": row["title"], 
+                    "title" : row["title"], 
                     "authors" : row["authors"], 
                     "published" : row["published"], 
-                    "article_url" : row["article_url"]
+                    "article_url" : row["article_url"],
+                    "pdf_url" : row["pdf_url"]
                 }
             )
+            print(f"paper meta dict: article_url:{self.url2meta[row['article_url']]['article_url']}, filepath:{self.url2meta[row['article_url']]['filepath']}")
         return True
     
     def strings_ranked_by_relatedness(self, 
@@ -121,8 +142,8 @@ class PaperRepository :
         top_n: int = 10,
         rel_th : float = 0.6) -> list[str]:
         """Returns a list of strings and relatednesses, sorted from most related to least."""
-        query_embedding_response = OpenAIUtils.embedding_request(query)
-        query_embedding = query_embedding_response["data"][0]["embedding"]
+        query_embedding_response = emb_service.embedding_texts([query])
+        query_embedding = query_embedding_response[0]
         strings_and_relatednesses = [
             ({
                 "filepath" : row["filepath"], 
@@ -145,52 +166,52 @@ class PaperRepository :
             return strings[:top_n]
         return None
 
-    def create(self, path) :
-        self.library_df.to_csv(path)
+    def create(self) :
+        self.library_df.to_csv(self.path)
 
-    def get_filepath(self, pdf_url) :
+    def get_filepath(self, article_url) :
         assert self.library_df is not None, f"No index loaded"
-        return self.url2meta[pdf_url]['filepath']
+        return self.url2meta[article_url]['filepath']
     
-    def get_title(self, pdf_url) :
+    def get_title(self, article_url) :
         assert self.library_df is not None, f"No index loaded"
-        return self.url2meta[pdf_url]['title']
+        return self.url2meta[article_url]['title']
     
-    def get_meta(self, pdf_url) :
+    def get_meta(self, article_url) :
         assert self.library_df is not None, f"No index loaded"
-        return self.url2meta[pdf_url]
-        
+        return self.url2meta[article_url]
+
 # chroma based local vector index, for paper trunks embedding
 class VectorStore :
     def __init__(self) :
         self.client = chromadb.Client()
-        self.collection = self.client.create_collection("all-my-documents")
-        pass
+        self.collection = self.client.get_or_create_collection("all-my-documents")
     
-    def indexed(self, pdf_url) :
-        return self.collection.get(f"{pdf_url}:0") is not None
+    def indexed(self, article_url) :
+        doc = self.collection.get(f"{article_url}:0")
+        return doc is not None and len(doc["ids"]) > 0
         
-    def add_paper(self, pdf_url, pdf_file_path, meta) :
+    def add_paper(self, article_url, pdf_file_path, meta) :
         # check existence of local pdf_file
         assert os.path.exists(pdf_file_path), f"File not found at {pdf_file_path}"
 
         pdf_text = Utils.read_pdf(pdf_file_path)
-        segments = Utils.chrunk_sentence(pdf_text)
+        segments = Utils.chunk_sentence(pdf_text, max_tokens_each_trunk = 64, max_chunks = 1024)
 
         # chrunk text
         self.collection.add(
-            embeddings=[OpenAIUtils.embedding_request(seg) for seg in segments], # too many requests for embedding
+            embeddings=emb_service.embedding_texts(segments), # too many requests for embedding
             documents=segments,
             metadatas=[meta] * len(segments), # for filtering
-            ids=[f"{pdf_url}:{i}" for i in range(len(segments))]
+            ids=[f"{article_url}:{i}" for i in range(len(segments))]
         )
     
-    def query(self, query_text = "", n_result = 10) :
+    def query(self, query_text = "", article_url = "", n_result = 10) :
         results = self.collection.query(
-            query_embeddings=[OpenAIUtils.embedding_request(query_text)],
-            query_texts=[query_text],
+            query_embeddings=emb_service.embedding_texts([query_text]),
             n_results=n_result,
-            # where={"metadata_field": "is_equal_to_this"}, # optional filter
-            # where_document={"$contains":"search_string"}  # optional filter
+            where={"article_url": article_url},
+            include=["documents", "distances"]
         )
-        return results
+        
+        return results['documents'], results["distances"]

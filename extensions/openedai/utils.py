@@ -3,12 +3,15 @@ from tenacity import retry, wait_random_exponential, stop_after_attempt
 from PyPDF2 import PdfReader
 import tiktoken
 import openai
+import math
+from chromadb.utils import embedding_functions
 
 GPT_MODEL = "gpt-3.5-turbo-0613"
 EMBEDDING_MODEL = "text-embedding-ada-002"
 
 openai.api_base = "https://dev.chatwithoracle.com/api/v1"
 
+"""General utils"""
 class Utils :
     def __init__(self) :
         pass
@@ -21,7 +24,7 @@ class Utils :
         return path
 
     @staticmethod
-    def read_pdf(path) :
+    def read_pdf(path, filter_ref = True) :
         """Takes a filepath to a PDF and returns a string of the PDF's contents"""
         # creating a pdf reader object
         reader = PdfReader(path)
@@ -29,7 +32,8 @@ class Utils :
         page_number = 0
         for page in reader.pages:
             page_number += 1
-            pdf_text += page.extract_text() + f"\nPage Number: {page_number}"
+            page_text = page.extract_text()
+            pdf_text += page_text + f"\nPage Number: {page_number}"
         return pdf_text
     
     @staticmethod
@@ -43,7 +47,7 @@ class Utils :
             while j > i + int(0.5 * n):
                 # Decode the tokens and check for full stop or newline
                 chunk = tokenizer.decode(tokens[i:j])
-                if chunk.endswith(".") or chunk.endswith("\n"):
+                if chunk.endswith(".") or chunk.endswith("\n") or chunk.endswith("?") or chunk.endswith("!"):
                     break
                 j -= 1
             # If no end of sentence found, use n tokens as the chunk size
@@ -53,13 +57,22 @@ class Utils :
             i = j
     
     @staticmethod
-    def chrunk_sentence(text, max_tokens = 1500) :
+    def chunk_sentence(text, max_tokens_each_trunk = 1500, max_chunks = None) :
         # Initialise tokenizer
         tokenizer = tiktoken.get_encoding("cl100k_base")
         # Chunk up the document into 1500 token chunks
-        chunks = Utils.create_sentence_chunks(text, max_tokens, tokenizer)
+        chunks = Utils.create_sentence_chunks(text, max_tokens_each_trunk, tokenizer)
         text_chunks = [tokenizer.decode(chunk) for chunk in chunks]
-        return text_chunks
+        
+        if max_chunks is None or len(text_chunks) <= max_chunks :
+            return text_chunks
+        
+        # merge chunks if max_chunks not None
+        merged_chunks = []
+        n = math.ceil(len(text_chunks)/float(max_chunks))
+
+        merged_chunks = ["".join(text_chunks[i:i+n if i+n < len(text_chunks) else len(text_chunks)]) for i in range(0, len(text_chunks), n)]
+        return merged_chunks
 
     @staticmethod
     def build_paper_head(paper_head, prefix = None) :
@@ -123,3 +136,16 @@ class OpenAIUtils :
             print("Unable to generate ChatCompletion response")
             print(f"Exception: {e}")
             return e
+        
+class EmbeddingService : 
+    def __init__(self, embedding_vendor = 'OpenAI') :
+        self.embedding_vendor = embedding_vendor
+
+    def embedding_texts(self, texts : list) :
+        # TODO: concurrent implementation
+        if self.embedding_vendor == 'OpenAI' :
+            embedding_func = embedding_functions.OpenAIEmbeddingFunction()
+        elif self.embedding_vendor == 'Default' :
+            embedding_func = embedding_functions.DefaultEmbeddingFunction()
+        
+        return embedding_func(texts)
