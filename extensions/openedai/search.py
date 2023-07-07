@@ -27,11 +27,12 @@ class Paper :
         self.pdf_url = pdf_url
         self.article_url = article_url
         self.published = f"20{self.pdf_url.split('/')[-1].split('.')[0]}" if self.pdf_url is not None else 'NA'
+        self.paper_id = self.article_url.split('/')[-1]
         self.venue = venue
         self.affiliation = affiliation
 
     def local_pdf_path(self, target_dir) :
-        return f"{target_dir}/{self.published}-{self.title}.pdf"
+        return f"{target_dir}/{self.paper_id}-{self.title}.pdf"
     
     @staticmethod
     def download_pdf_to_path(url, path) :
@@ -169,6 +170,10 @@ class PaperRepository :
     def create(self) :
         self.library_df.to_csv(self.path)
 
+    def get_pdf_url(self, article_url) :
+        assert self.library_df is not None, f"No index loaded"
+        return self.url2meta[article_url]['pdf_url']
+    
     def get_filepath(self, article_url) :
         assert self.library_df is not None, f"No index loaded"
         return self.url2meta[article_url]['filepath']

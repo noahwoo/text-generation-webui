@@ -108,8 +108,8 @@ def chat_with_paper(query, article_url) :
 
     pdf_file_path = paper_repo.get_filepath(article_url)
     if not os.path.exists(pdf_file_path):
-        print(f"Download paper from [{article_url}] to [{pdf_file_path}]")
-        Utils.download_pdf_to_path(article_url, pdf_file_path)
+        print(f"Download paper from [{paper_repo.get_pdf_url(article_url)}] to [{pdf_file_path}]")
+        Utils.download_pdf_to_path(paper_repo.get_pdf_url(article_url), pdf_file_path)
     
     if not paper_chunks.indexed(article_url) :
         print(f"Chunk paper and index with key [{article_url}]")
@@ -130,8 +130,8 @@ def chat_with_paper(query, article_url) :
         messages=[
             {
                 "role": "user",
-                "content": f"""Given the Background Content, summarize an answer for the user query.\n\n
-                    Background Content:{background}\nUser Query:{query}\nSummary:""",
+                "content": f"""Given the relevant content from the paper, summarize an answer for the user query.\n\n
+                    Paper Content:{background}\nUser Query:{query}\nSummary:""",
             }
         ],
         temperature=0,
